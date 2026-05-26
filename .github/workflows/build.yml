@@ -1,0 +1,95 @@
+name: Build & deploy MCP services
+
+# Every push to main builds whichever services exist under services/ and
+# bumps their image tags in the infrastructure repo. The matrix below is
+# explicit (not auto-discovered) so adding a service is a deliberate one-
+# line change here + a deployment manifest in the infra repo.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_ORG: codeinfinity-pty-ltd
+
+jobs:
+  build:
+    name: build ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - hello
+          # Add new services here. The directory under services/<name>/
+          # must contain a Dockerfile + pyproject.toml + uv.lock.
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push image for ${{ matrix.service }}
+        uses: docker/build-push-action@v5
+        with:
+          context: ./services/${{ matrix.service }}
+          file: ./services/${{ matrix.service }}/Dockerfile
+          push: true
+          cache-from: type=gha,scope=mcp-${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=mcp-${{ matrix.service }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_ORG }}/mcp-${{ matrix.service }}:v${{ github.run_number }}-${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_ORG }}/mcp-${{ matrix.service }}:latest
+
+  update-infra:
+    name: bump infra tags
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout infrastructure repo
+        uses: actions/checkout@v4
+        with:
+          repository: CodeInfinity-Pty-Ltd/c8eapps_infrastructure
+          token: ${{ secrets.INFRA_REPO_TOKEN }}
+          path: infra
+
+      - name: Update mcp-services image tags
+        # The infra repo's per-service kustomization.yaml files carry the
+        # imagepolicy comment marker; sed targets exactly that line. Skip
+        # services that don't have a manifest yet.
+        run: |
+          set -euo pipefail
+          cd infra
+          NEW_TAG="v${{ github.run_number }}-${{ github.sha }}"
+          for svc in hello; do
+            file="infrastructure/mcp-services/${svc}/kustomization.yaml"
+            if [ ! -f "$file" ]; then
+              echo "skip: $file not present yet"
+              continue
+            fi
+            sed -i "s|newTag: .* # {\"\\\$imagepolicy\": \"flux-system:mcp-${svc}:tag\"}|newTag: ${NEW_TAG} # {\"\\\$imagepolicy\": \"flux-system:mcp-${svc}:tag\"}|" "$file"
+            git add "$file"
+          done
+
+      - name: Commit and push if changed
+        run: |
+          cd infra
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git diff --cached --quiet || git commit -m "chore(mcp): bump mcp-services to v${{ github.run_number }}"
+          git push

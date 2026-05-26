@@ -1,0 +1,33 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Node (frontend, if any service adds one later)
+node_modules/
+
+# Tina4
+data/
+logs/
+secrets/
+.tina4/
+
+# Environment
+.env
+.env.*
+
+# IDE
+.idea/
+.vscode/
+.claude/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
