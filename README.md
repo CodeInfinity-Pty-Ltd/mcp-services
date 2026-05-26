@@ -135,6 +135,102 @@ Tests cover the dispatcher in isolation — no HTTP layer, no Keycloak.
 Adding an integration without tests is a violation of the project rule
 (see `plan/`).
 
+## Integration credentials
+
+Per-integration creds live in the SOPS-encrypted
+`infrastructure/mcp-services/base/secrets-integrations.yaml` secret in the
+infra repo. It's mounted into the pod as env vars via
+`envFrom: { secretRef: { name: mcp-integration-creds } }`. Each
+integration module reads its vars at first-call time and surfaces a clear
+"not configured" error if they're missing — so the secret can ship with
+placeholders for integrations you haven't wired yet.
+
+### Basecamp 3 — one-time OAuth setup
+
+Basecamp uses OAuth 2 with `launchpad.37signals.com` as the identity
+provider. You need to do this **once**; the refresh token is long-lived
+and the pod swaps it for fresh access tokens on demand.
+
+1. **Register an integration** at
+   https://launchpad.37signals.com/integrations →
+   *Register a new integration*.
+   - Name: `mcp-services`
+   - Company: c8eapps
+   - Redirect URI: `https://mcp.c8eapps.co.za/_basecamp_callback`
+     *(we don't actually serve a callback today — but Basecamp requires
+     a value here, and using the production host lets you upgrade to a
+     fully automated re-auth flow later)*
+
+   Save the **Client ID** and **Client Secret**.
+
+2. **Authorise once** by opening this URL in a browser, signed in to the
+   Basecamp account you want to expose (replace `CLIENT_ID`):
+
+   ```
+   https://launchpad.37signals.com/authorization/new
+     ?type=web_server
+     &client_id=CLIENT_ID
+     &redirect_uri=https://mcp.c8eapps.co.za/_basecamp_callback
+   ```
+
+   You'll be asked to grant access. After confirming, the browser
+   redirects to `https://mcp.c8eapps.co.za/_basecamp_callback?code=XXXX`
+   — that will 404 (we don't serve that path), but **the `code` query
+   parameter in the URL bar is what you need**.
+
+3. **Exchange the code for tokens** with curl:
+
+   ```bash
+   curl -sS -X POST 'https://launchpad.37signals.com/authorization/token' \
+     -d 'type=web_server' \
+     -d 'client_id=CLIENT_ID' \
+     -d 'client_secret=CLIENT_SECRET' \
+     -d 'redirect_uri=https://mcp.c8eapps.co.za/_basecamp_callback' \
+     -d 'code=CODE_FROM_STEP_2'
+   ```
+
+   Response:
+
+   ```json
+   {
+     "access_token":  "BAh...",
+     "refresh_token": "BAh...",
+     "expires_in": 1209600
+   }
+   ```
+
+4. **Find your account_id** with the new access token:
+
+   ```bash
+   curl -sS https://launchpad.37signals.com/authorization.json \
+     -H 'Authorization: Bearer ACCESS_TOKEN'
+   ```
+
+   Response includes `accounts: [{id: 9999999, name: "...", product: "bc3"}]`.
+   Pick the id whose `product` is `bc3` — that's your `BASECAMP_ACCOUNT_ID`.
+
+5. **Populate the SOPS secret** in the infra repo:
+
+   ```bash
+   cd ~/IdeaProjects/c8eapps_infrastructure
+   SOPS_AGE_KEY_FILE=~/.config/sops/age/keys.txt \
+     sops infrastructure/mcp-services/base/secrets-integrations.yaml
+   ```
+
+   Replace the four `PLACEHOLDER_*` Basecamp values with your real ones.
+   Save + commit + push — Flux applies it and the next pod rollout picks
+   up the new env.
+
+You can throw away the **access_token** from step 3 — the pod will mint
+its own from the refresh_token.
+
+### Clockify
+
+Just one value:
+
+1. https://app.clockify.me/user/settings → **API** section → *Generate*.
+2. Paste it into the SOPS secret under `CLOCKIFY_API_KEY`.
+
 ## Keycloak setup
 
 Realm: `mcp` at `https://auth.c8eapps.co.za/realms/mcp`. One client
