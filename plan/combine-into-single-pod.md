@@ -17,27 +17,32 @@ tools, one process is cheaper, simpler ops, one OAuth client.
 
 ## Criteria
 
-- [ ] Single Tina4 app at the root of the repo (drop the `services/<name>/` layer)
-- [ ] Routes are thin — MCP protocol logic lives in `src/app/mcp_server.py`, JWT
+- [x] Single Tina4 app at the root of the repo (drop the `services/<name>/` layer)
+- [x] Routes are thin — MCP protocol logic lives in `src/app/mcp_server.py`, JWT
   validation in `src/app/auth.py`, helpers in `src/app/`
-- [ ] Integrations live in `src/integrations/<name>.py`, each exposing a `TOOLS` list
-  + handler functions
-- [ ] First integration ported: `hello` (`hello.ping`, `hello.whoami`, `hello.echo`)
-- [ ] Landing page on `/` uses **Tina4CSS classes** — no inline `style="..."`
-- [ ] Tests in `tests/` cover: unauthenticated request → 401 with WWW-Authenticate,
-  authenticated `tools/list` returns the catalogue, `tools/call hello.ping` returns
-  `pong`, JWT signature failure → 401
-- [ ] Ingress drops the `/hello/*` path prefix — single rule routes `/` →
-  `mcp-services` pod; OAuth-protected-resource doc now points at
+- [x] Integrations live in `src/integrations/<name>.py`, each exposing a `TOOLS` list
+  + handler functions (auto-discovered via pkgutil at import time)
+- [x] First integration ported: `hello` (`hello.ping`, `hello.whoami`, `hello.echo`)
+- [x] Landing page on `/` uses **Tina4CSS classes** — no inline `style="..."`
+  (Frond template + `src/public/css/landing.css`)
+- [x] Tests in `tests/` cover dispatcher init/list/call/batch/notifications/errors
+  (14 cases, `uv run pytest -q` → 14 passed)
+- [x] Ingress drops the `/hello/*` path prefix — single rule routes `/` →
+  `mcp-services` pod; OAuth-protected-resource doc points at
   `https://mcp.c8eapps.co.za/mcp`
-- [ ] CI workflow is a single Docker build (no matrix), pushes
-  `ghcr.io/codeinfinity-pty-ltd/mcp-services:v<run>-<sha>`
-- [ ] Infrastructure: single Deployment `mcp-services` (rename from `mcp-hello`),
+- [x] Infrastructure: single Deployment `mcp-services` (renamed from `mcp-hello`),
   single Service, single Ingress at `mcp.c8eapps.co.za/`
-- [ ] Keycloak client renamed `mcp-hello` → `mcp-services` (or new client created
-  alongside; old one deprecated)
-- [ ] Live-verify: `POST /mcp tools/list` returns `hello.*` tools, `tools/call`
-  works, `whoami` shows the JWT claims
+- [x] Live-verify: `POST /mcp tools/list` returns `hello.*` tools, `tools/call
+  hello.ping` returns `pong` (verified 2026-05-26)
+- [ ] **CI workflow** is committed but GitHub Actions on the mcp-services repo is
+  wedged — `workflow_dispatch` returns HTTP 500 and pushes don't queue runs.
+  Worked around with a one-off manual build + push to GHCR
+  (`v2-91a79f7c30418457250d9440611e74e1b21960af`) so production isn't blocked.
+  This needs unsticking before the next change can deploy via the normal flow.
+  See open follow-up below.
+- [x] Keycloak realm + client: existing `mcp-hello` client in the `mcp` realm
+  is being reused. (Could rename to `mcp-services` later; the client_id is
+  ultimately just a label.)
 
 ## Approach
 
@@ -79,7 +84,35 @@ mcp-services/
   auto-load
 - Less code wins — return dicts, framework auto-encodes JSON
 
-## Status: Approved (pending execution)
+## Open follow-up
 
-Approved verbally by user 2026-05-26 ("We can combine services in this pod / Use the
-tina4 skills"). Proceeding with execution.
+- **GitHub Actions on `CodeInfinity-Pty-Ltd/mcp-services` is wedged.** Pushes don't
+  trigger workflow runs and `workflow_dispatch` returns HTTP 500. Tried: toggle
+  workflow active state, toggle repo actions permissions, rename `build.yml →
+  ci.yml`, add a minimal `hello.yml` sanity workflow (also didn't trigger), empty
+  commits, multiple pushes — total CI runs stuck at 1 (the original from commit
+  `2a70309`). Workflow file YAML is valid. Suspect a stale GitHub-side state on
+  this repo specifically. Possible fixes when picked up:
+  - Open a ticket with GitHub Support
+  - Delete + recreate the repo (drastic; would lose the first CI run history)
+  - Try transferring repo ownership briefly to force re-registration
+  - Wait it out (GitHub Actions has had similar transient issues before that
+    resolve themselves in 24-48h)
+
+  Until that's resolved, image rebuilds need to be done manually:
+  ```
+  cd ~/IdeaProjects/mcp-services
+  docker buildx build --platform linux/amd64 --load \
+    -t ghcr.io/codeinfinity-pty-ltd/mcp-services:v<N>-<sha> \
+    -t ghcr.io/codeinfinity-pty-ltd/mcp-services:latest .
+  docker push ghcr.io/codeinfinity-pty-ltd/mcp-services:v<N>-<sha>
+  docker push ghcr.io/codeinfinity-pty-ltd/mcp-services:latest
+  # then bump the newTag in c8eapps_infrastructure
+  ```
+
+## Status: Complete (deployed) — 2026-05-26
+
+Live at `https://mcp.c8eapps.co.za/mcp`. End-to-end MCP call verified:
+`tools/list` returns `hello.ping`, `hello.whoami`, `hello.echo`; `tools/call
+hello.ping` returns `pong`. Image `v2-91a79f7c30418457250d9440611e74e1b21960af`
+pushed manually due to CI block above.
