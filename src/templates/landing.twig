@@ -1,0 +1,53 @@
+{# Landing page for mcp.c8eapps.co.za — what a human sees when they
+   visit the bare URL. Machines go to /.well-known/oauth-protected-resource. #}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ title }}</title>
+  <link rel="stylesheet" href="/css/tina4.css">
+  <link rel="stylesheet" href="/css/landing.css">
+</head>
+<body class="landing">
+  <main class="landing-card">
+    <h1 class="landing-title">mcp-services</h1>
+    <p class="landing-subtitle">
+      Model Context Protocol servers for the c8eapps stack.
+    </p>
+
+    <section class="landing-section">
+      <h2 class="landing-h2">Connect from Claude.ai</h2>
+      <p>
+        Settings &rarr; Connectors &rarr; Add custom MCP server. Point it at:
+      </p>
+      <pre class="landing-code">{{ mcp_url }}</pre>
+      <p class="landing-muted">
+        Authentication is OAuth 2.1 via
+        <a href="{{ issuer }}" class="landing-link">{{ issuer }}</a>.
+        Claude.ai discovers the auth server automatically from
+        <code>/.well-known/oauth-protected-resource</code>.
+      </p>
+    </section>
+
+    {% if integrations %}
+    <section class="landing-section">
+      <h2 class="landing-h2">Loaded integrations</h2>
+      <ul class="landing-list">
+        {% for integration in integrations %}
+        <li><code>{{ integration }}</code></li>
+        {% endfor %}
+      </ul>
+    </section>
+    {% endif %}
+
+    <footer class="landing-footer">
+      <a href="https://github.com/CodeInfinity-Pty-Ltd/mcp-services" class="landing-link">github</a>
+      &middot;
+      <a href="/health" class="landing-link">/health</a>
+      &middot;
+      <a href="/.well-known/oauth-protected-resource" class="landing-link">PRM</a>
+    </footer>
+  </main>
+</body>
+</html>

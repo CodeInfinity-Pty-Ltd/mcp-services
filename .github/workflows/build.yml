@@ -1,9 +1,8 @@
-name: Build & deploy MCP services
+name: Build & deploy
 
-# Every push to main builds whichever services exist under services/ and
-# bumps their image tags in the infrastructure repo. The matrix below is
-# explicit (not auto-discovered) so adding a service is a deliberate one-
-# line change here + a deployment manifest in the infra repo.
+# Single Docker image for the whole pod — all MCP integrations live in
+# the same container under src/integrations/. CI runs tests, builds, pushes
+# to GHCR, and bumps the image tag in the infra repo so Flux rolls the pod.
 
 on:
   push:
@@ -12,23 +11,29 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_ORG: codeinfinity-pty-ltd
+  IMAGE: codeinfinity-pty-ltd/mcp-services
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: uv sync
+        run: uv sync --frozen --all-groups
+
+      - name: pytest
+        run: uv run pytest -q
+
   build:
-    name: build ${{ matrix.service }}
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-
-    strategy:
-      fail-fast: false
-      matrix:
-        service:
-          - hello
-          # Add new services here. The directory under services/<name>/
-          # must contain a Dockerfile + pyproject.toml + uv.lock.
 
     steps:
       - uses: actions/checkout@v4
@@ -41,20 +46,19 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build & push image for ${{ matrix.service }}
+      - name: Build & push image
         uses: docker/build-push-action@v5
         with:
-          context: ./services/${{ matrix.service }}
-          file: ./services/${{ matrix.service }}/Dockerfile
+          context: .
+          file: ./Dockerfile
           push: true
-          cache-from: type=gha,scope=mcp-${{ matrix.service }}
-          cache-to: type=gha,mode=max,scope=mcp-${{ matrix.service }}
+          cache-from: type=gha,scope=mcp-services
+          cache-to: type=gha,mode=max,scope=mcp-services
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_ORG }}/mcp-${{ matrix.service }}:v${{ github.run_number }}-${{ github.sha }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_ORG }}/mcp-${{ matrix.service }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE }}:v${{ github.run_number }}-${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE }}:latest
 
   update-infra:
-    name: bump infra tags
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -68,23 +72,14 @@ jobs:
           token: ${{ secrets.INFRA_REPO_TOKEN }}
           path: infra
 
-      - name: Update mcp-services image tags
-        # The infra repo's per-service kustomization.yaml files carry the
-        # imagepolicy comment marker; sed targets exactly that line. Skip
-        # services that don't have a manifest yet.
+      - name: Bump image tag
         run: |
           set -euo pipefail
           cd infra
           NEW_TAG="v${{ github.run_number }}-${{ github.sha }}"
-          for svc in hello; do
-            file="infrastructure/mcp-services/${svc}/kustomization.yaml"
-            if [ ! -f "$file" ]; then
-              echo "skip: $file not present yet"
-              continue
-            fi
-            sed -i "s|newTag: .* # {\"\\\$imagepolicy\": \"flux-system:mcp-${svc}:tag\"}|newTag: ${NEW_TAG} # {\"\\\$imagepolicy\": \"flux-system:mcp-${svc}:tag\"}|" "$file"
-            git add "$file"
-          done
+          file="infrastructure/mcp-services/app/kustomization.yaml"
+          sed -i "s|newTag: .* # {\"\\\$imagepolicy\": \"flux-system:mcp-services:tag\"}|newTag: ${NEW_TAG} # {\"\\\$imagepolicy\": \"flux-system:mcp-services:tag\"}|" "$file"
+          git add "$file"
 
       - name: Commit and push if changed
         run: |

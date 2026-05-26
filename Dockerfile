@@ -1,6 +1,4 @@
-# Build context for this Dockerfile is the **service directory itself**
-# (e.g. services/hello), not the repo root. Keeps the per-service images
-# small and independent.
+# Build context is the repo root. Single image, single pod.
 
 FROM python:3.13-slim
 
@@ -13,7 +11,8 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
 
-# App code
+# App code — templates + public assets too, since the landing route renders
+# a Frond template and references CSS from src/public/css/.
 COPY app.py ./
 COPY src/ ./src/
 

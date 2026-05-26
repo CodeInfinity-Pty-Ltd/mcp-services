@@ -1,0 +1,21 @@
+[project]
+name = "mcp-services"
+version = "0.2.0"
+description = "MCP servers for the c8eapps stack — single Tina4-Python app at https://mcp.c8eapps.co.za, OAuth via Keycloak. Drop a file in src/integrations/ to add a new MCP integration."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "tina4-python>=3.11.12",
+    "pyjwt[crypto]>=2.10.0",
+    "requests>=2.32.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[tool.pytest.ini_options]
+# src/ is the app package, so pytest needs the repo root on sys.path.
+pythonpath = ["."]
+testpaths = ["tests"]

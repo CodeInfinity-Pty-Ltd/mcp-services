@@ -1,121 +1,152 @@
 # mcp-services
 
-MCP (Model Context Protocol) servers for the **c8eapps** stack. Each service
-exposes one integration — postaction admin, etios FXCM monitoring, agile-admin
-queries, etc. — as a remote MCP server reachable by Claude.ai and any other
-MCP client at:
+A single Tina4-Python pod that hosts every Model Context Protocol server
+for the **c8eapps** stack. Reachable from Claude.ai (and any other MCP
+client) at:
 
 ```
-https://mcp.c8eapps.co.za/<service>/
+https://mcp.c8eapps.co.za/mcp
 ```
 
-Every service is a standalone pod on our shared MicroK8s cluster, built with
-**Tina4-Python**, behind a single ingress that path-routes to the right pod.
-Authentication is OAuth 2.1 via the existing Keycloak at `auth.c8eapps.co.za`
-— each MCP server is a Keycloak client and validates Bearer JWTs on every
-request.
+OAuth 2.1 is the only way in — every request validates a Bearer JWT issued
+by Keycloak at `https://auth.c8eapps.co.za/realms/mcp`.
 
 ## Layout
 
 ```
 mcp-services/
-├── README.md
-├── .github/workflows/build.yml      # per-service Docker build → GHCR → infra repo bump
-├── services/
-│   └── hello/                        # template service — copy this to add a new one
-│       ├── Dockerfile
-│       ├── pyproject.toml
-│       ├── uv.lock
-│       ├── app.py                    # Tina4 entrypoint
-│       └── src/
-│           ├── routes/
-│           │   ├── mcp.py            # MCP JSON-RPC endpoint (/mcp)
-│           │   ├── wellknown.py      # OAuth Protected Resource Metadata
-│           │   └── health.py         # /health for k8s probes
-│           ├── auth.py               # Bearer-token validator (Keycloak JWKS)
-│           └── tools.py              # the service's own MCP tools
-└── (your new service goes here)
+├── app.py                     Tina4 entrypoint
+├── Dockerfile
+├── pyproject.toml + uv.lock
+├── plan/                      Per-feature plans (Tina4 convention)
+├── src/
+│   ├── app/
+│   │   ├── auth.py            Bearer JWT validator (Keycloak JWKS)
+│   │   └── mcp_server.py      JSON-RPC dispatcher + tool registry
+│   ├── integrations/
+│   │   └── hello.py           Template integration — copy this
+│   ├── routes/
+│   │   ├── mcp.py             POST /mcp (thin — delegates to mcp_server)
+│   │   ├── wellknown.py       /.well-known/oauth-* (RFC 9728)
+│   │   ├── landing.py         GET / (Frond template, Tina4CSS)
+│   │   └── health.py          GET /health (unauthenticated)
+│   ├── templates/landing.twig
+│   └── public/css/landing.css
+└── tests/
+    └── test_mcp_server.py     pytest, 14 cases, no live network
 ```
 
-## Add a new MCP service
+## Add a new MCP integration
 
-1. `cp -R services/hello services/<name>` and rename the package in
-   `pyproject.toml`.
-2. Replace the tool implementations in `src/tools.py` with whatever the
-   integration needs.
-3. Add the service to `.github/workflows/build.yml`'s `services` matrix.
-4. Add a deployment + service manifest under
-   `c8eapps_infrastructure/infrastructure/mcp-services/base/<name>/`, plus
-   a path rule in the shared ingress.
-5. Register a Keycloak client (see [Keycloak setup](#keycloak-setup)).
-6. Push to `main` — CI builds, Flux deploys, you're at
-   `https://mcp.c8eapps.co.za/<name>/`.
+1. **Drop a file** in `src/integrations/<name>.py` exporting a `TOOLS` list:
 
-## How a service is wired together
+   ```python
+   from typing import Any
 
-| Path | Purpose |
-|---|---|
-| `GET  /<service>/` | redirects to `/<service>/.well-known/oauth-protected-resource` for client discovery |
-| `GET  /<service>/.well-known/oauth-protected-resource` | OAuth 2.0 [RFC 9728](https://datatracker.ietf.org/doc/rfc9728/) Protected Resource Metadata — tells Claude.ai which auth server to use (Keycloak realm `mcp`) |
-| `POST /<service>/mcp` | MCP Streamable HTTP transport — JSON-RPC in, JSON or SSE stream out |
-| `GET  /<service>/mcp` | server-initiated SSE stream (rarely used; mostly tool invocation results) |
-| `GET  /<service>/health` | k8s liveness/readiness — unauthenticated, returns `{"ok":true}` |
+   def _list_things(args: dict, claims: dict) -> dict:
+       return {"things": ["a", "b", "c"]}
 
-Every request to `/mcp` validates the `Authorization: Bearer <jwt>` header
-against Keycloak's JWKS for the `mcp` realm. Unauthenticated requests get a
-401 with `WWW-Authenticate: Bearer resource_metadata="…"` — the standard
-challenge that points Claude.ai at the discovery doc.
+   TOOLS: list[dict[str, Any]] = [
+       {
+           "name": "yourservice.list_things",
+           "description": "List the things this integration knows about.",
+           "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+           "handler": _list_things,
+       },
+   ]
+   ```
 
-## Adding the server to Claude.ai
+2. **Run the tests** — `uv run pytest -q`. The dispatcher auto-discovers
+   the new file at import time; if your tool name collides with another
+   integration's, the test suite catches it.
+
+3. **Push to main.** CI builds + pushes the image, Flux rolls the single
+   `mcp-services` pod, and your tools appear in any client's `tools/list`
+   on the next call.
+
+That's it — no new deployment manifest, no new ingress rule, no new
+Keycloak client. One pod, many integrations, namespaced tool names.
+
+## Naming convention
+
+Tool names are `<integration>.<action>` — dotted for human grouping, flat
+for the MCP namespace:
+
+```
+hello.ping
+hello.whoami
+hello.echo
+postaction.list_tenants      (when added)
+fxcm.get_open_orders         (when added)
+```
+
+## How a request flows
+
+```
+Claude.ai
+   │  Bearer <jwt>
+   ▼
+nginx ingress  ───►  Tina4 pod (mcp-services)
+                       │
+                       ├─► POST /mcp
+                       │     │
+                       │     ├─► src/app/auth.py        validate JWT (Keycloak JWKS)
+                       │     │
+                       │     └─► src/app/mcp_server.py  dispatch JSON-RPC
+                       │             │
+                       │             ├─► initialize / tools/list / tools/call / ping
+                       │             │
+                       │             └─► src/integrations/<name>.TOOLS[…].handler
+                       │
+                       ├─► GET /.well-known/oauth-protected-resource   (RFC 9728)
+                       ├─► GET /.well-known/oauth-authorization-server (Keycloak passthrough)
+                       ├─► GET /                                       (Frond landing page)
+                       └─► GET /health                                 (k8s probe)
+```
+
+## Connecting from Claude.ai
 
 1. Settings → Connectors → Add custom MCP server
-2. URL: `https://mcp.c8eapps.co.za/<service>/`
-3. Claude.ai discovers the auth server, walks you through Keycloak login,
-   and stores the resulting access token.
-
-## Keycloak setup
-
-The MCP servers all sit behind the **`mcp`** realm at
-`https://auth.c8eapps.co.za/realms/mcp/`. Each service is a Keycloak
-client. To register a new client:
-
-```bash
-# Get an admin token (one-time, replace USER/PASS)
-TOKEN=$(curl -sS -X POST https://auth.c8eapps.co.za/realms/master/protocol/openid-connect/token \
-  -d "client_id=admin-cli&grant_type=password&username=<admin>&password=<pass>" \
-  | jq -r .access_token)
-
-# Register the client
-curl -sS -X POST https://auth.c8eapps.co.za/admin/realms/mcp/clients \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "clientId": "mcp-<service>",
-    "publicClient": false,
-    "standardFlowEnabled": true,
-    "directAccessGrantsEnabled": false,
-    "redirectUris": ["https://claude.ai/api/mcp/auth_callback"],
-    "webOrigins": ["https://claude.ai"]
-  }'
-```
-
-Save the client's `client_id` + `client_secret` somewhere — Claude.ai will
-prompt for them when first connecting.
+2. URL: `https://mcp.c8eapps.co.za/mcp`
+3. Claude.ai fetches `/.well-known/oauth-protected-resource`, sees the
+   Keycloak realm, walks you through login, stores the token.
 
 ## Local development
 
-Inside a service directory:
-
 ```bash
-cd services/hello
 uv sync
 KEYCLOAK_URL=https://auth.c8eapps.co.za \
 KEYCLOAK_REALM=mcp \
-MCP_SERVICE_NAME=hello \
-MCP_BASE_PATH=/hello \
 PUBLIC_BASE_URL=http://localhost:7145 \
+MCP_DEV_BYPASS_AUTH=1 \
 uv run python app.py 0.0.0.0:7145
 ```
 
-`MCP_DEV_BYPASS_AUTH=1` skips JWT validation so you can poke at it with curl
-without spinning up Keycloak — **never** ship that to production.
+`MCP_DEV_BYPASS_AUTH=1` skips JWT validation so you can curl without
+spinning up Keycloak. **Never** ship that to production.
+
+## Tests
+
+```bash
+uv run pytest -q
+```
+
+Tests cover the dispatcher in isolation — no HTTP layer, no Keycloak.
+Adding an integration without tests is a violation of the project rule
+(see `plan/`).
+
+## Keycloak setup
+
+Realm: `mcp` at `https://auth.c8eapps.co.za/realms/mcp`. One client
+(`mcp-services`) for the whole pod. See
+[`.important/server-credentials.md` in the infra repo] for client_id +
+client_secret. Operator notes for registering new clients are in the same
+file.
+
+## Infrastructure
+
+K8s manifests live in
+[`c8eapps_infrastructure`](https://github.com/CodeInfinity-Pty-Ltd/c8eapps_infrastructure)
+under `infrastructure/mcp-services/`. One deployment, one service, one
+ingress for `mcp.c8eapps.co.za`. CI bumps the image tag in that repo on
+every push to `main` and Flux rolls the pod within a couple of minutes.
