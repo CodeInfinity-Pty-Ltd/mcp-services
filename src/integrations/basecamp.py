@@ -178,9 +178,14 @@ def _paginate(path: str, *, params: Optional[dict] = None) -> list:
 # ---------------------------------------------------------------------------
 
 def _list_projects(args: dict, claims: dict) -> dict:
-    """All active projects (override with status='archived'|'trashed')."""
-    status = args.get("status") or "active"
-    return {"projects": _paginate("projects.json", params={"status": status})}
+    """All active projects (pass status='archived'|'trashed' to see others).
+
+    Basecamp's projects endpoint only accepts ``status=archived`` or
+    ``status=trashed`` — sending ``status=active`` returns HTTP 400. Omit
+    the param entirely for the default active list."""
+    status = args.get("status")
+    params = {"status": status} if status in ("archived", "trashed") else None
+    return {"projects": _paginate("projects.json", params=params)}
 
 
 def _get_project(args: dict, claims: dict) -> dict:
